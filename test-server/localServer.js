@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express = require('express');
 const path = require('path');
 const fs = require('fs').promises;
+const moment = require('moment');
 const enums_1 = require("./enums");
 const localServerTools_1 = require("./localServerTools");
 /**
@@ -34,6 +35,13 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
     // Recover SMIL config: a SMIL URL that 404s until flipped valid (broken->valid),
     // for error-recovery tests. Missing/true => broken (404); false => serve valid.
     const recoverConfig = {};
+    // Version query param appended by the /moved/redirect Location header; bumped
+    // via POST /moved/bump to simulate content moving to a new URL (media-moved).
+    let movedVersion = 1;
+    // Content version served by the /storage-cache harness; POST /storage-cache/set/:v.
+    let storageCacheVersion = 1;
+    // Origin of the /swap-stress time buckets; reset per test via POST /reset.
+    let swapOrigin = Date.now();
     // Allow cross-origin requests from the emulator (localhost:8090)
     app.use((_req, res, next) => {
         res.header('Access-Control-Allow-Origin', '*');
@@ -49,6 +57,9 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         Object.keys(fallbackConfig).forEach(key => delete fallbackConfig[key]);
         Object.keys(recoverConfig).forEach(key => delete recoverConfig[key]);
         reportFailMode = false;
+        movedVersion = 1;
+        storageCacheVersion = 1;
+        swapOrigin = Date.now();
         res.json({ ok: true });
     });
     /** Replace hardcoded localhost:3000 in SMIL content with actual port */
@@ -128,6 +139,73 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         });
         res.send(fileString);
     });
+    // Campaign-swap stress endpoint (customer "old content keeps playing after a campaign
+    // swap" investigation). Serves the customer's playlist shape — excl > par > seq(indefinite)
+    // of wallclock <seq repeatCount="1" playMode="one"> campaigns plus an always-on pool — and
+    // swaps ONE campaign slot between two videos on a fixed wall-clock period. Last-Modified is
+    // the bucket start, so HEAD and GET agree and every bucket boundary is exactly one SMIL
+    // update. GET /swap-stress-state exposes the origin/period so a test can compute buckets.
+    const SWAP_PERIOD_MS = Number(process.env.SWAP_PERIOD_MS) || 45000;
+    const swapBucket = () => Math.floor((Date.now() - swapOrigin) / SWAP_PERIOD_MS);
+    const swapLastModified = () => new Date(swapOrigin + swapBucket() * SWAP_PERIOD_MS).toUTCString();
+    const renderSwapStress = () => {
+        const wc = (m) => `wallclock(${localServerTools_1.formatDate(m)})`;
+        const swapVideo = swapBucket() % 2 === 0 ? 'assets/loader.mp4' : 'assets/landscape1.mp4';
+        const region = 'cm1kk7rmk0005bfefhlh9hqb6';
+        const video = (src) => `<video src="http://localhost:3000/${src}" soundLevel="0%" region="${region}"/>`;
+        const campaign = (begin, end, src) => `<seq repeatCount="1" begin="${wc(begin)}" end="${wc(end)}" playMode="one">${video(src)}</seq>`;
+        return `<smil>
+  <head>
+    <meta http-equiv="Refresh" content="5" onlySmilUpdate="true"/>
+    <meta defaultRepeatCount="indefinite"/>
+    <layout>
+      <root-layout width="1920" height="1080" backgroundColor="#000000"/>
+      <region regionName="${region}" left="0" top="0" width="1920" height="1080" z-index="1" backgroundColor="#000000"/>
+    </layout>
+  </head>
+  <body>
+    <par>
+      <seq end="__prefetchEnd.endEvent">
+        <seq repeatCount="indefinite">
+          <img src="http://localhost:3000/assets/content-downloading-landscape.jpeg" dur="5s" fit="fill"/>
+        </seq>
+      </seq>
+      <par begin="__prefetchEnd.endEvent" repeatCount="indefinite">
+        <excl>
+          <par>
+            <seq repeatCount="indefinite">
+              ${campaign(moment().subtract(3, 'days'), moment().subtract(2, 'days'), 'assets-b/video-test-1.mp4')}
+              ${campaign(moment().subtract(1, 'days'), moment().add(1, 'days'), 'assets/video-test-1.mp4')}
+              ${campaign(moment().subtract(1, 'days'), moment().add(1, 'days'), swapVideo)}
+              ${campaign(moment().add(1, 'days'), moment().add(2, 'days'), 'assets-b/video-test-2.mp4')}
+              <seq repeatCount="1" playMode="one">
+                ${video('assets/video-test-2.mp4')}
+                ${video('assets-b/video-test-2.mp4')}
+              </seq>
+            </seq>
+          </par>
+        </excl>
+      </par>
+    </par>
+  </body>
+</smil>`;
+    };
+    app.get('/swap-stress-state', (_req, res) => {
+        res.json({ origin: swapOrigin, periodMs: SWAP_PERIOD_MS, bucket: swapBucket() });
+    });
+    app.head('/swap-stress/:fileName', (_req, res) => {
+        res.set({ 'Content-type': 'text/xml', 'Last-Modified': swapLastModified(), 'Cache-Control': 'no-cache, no-store' });
+        res.end();
+    });
+    app.get('/swap-stress/:fileName', (req, res) => {
+        res.set({
+            'Content-Disposition': `attachment; filename="${req.params.fileName}"`,
+            'Content-type': 'text/xml',
+            'Last-Modified': swapLastModified(),
+            'Cache-Control': 'no-cache, no-store',
+        });
+        res.send(rewriteSmilPort(renderSwapStress()));
+    });
     // Alias route serving the same asset bytes under a distinct URL path. Lets a
     // fixture give two SMIL elements different src identities without duplicating
     // binary files (query-string variants break the player's video localFilePath
@@ -174,6 +252,38 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         const buf = await fs.readFile(`./${enums_1.TestServer.assetsPath}/landscape1.jpg`);
         res.set('Content-Type', 'image/jpeg');
         res.send(buf);
+    });
+    // Moved-content harness (media-moved reporting). The slot 204+redirects to the
+    // shared content URL with a version query param. Bumping the version via POST
+    // changes the Location URL while the content bytes stay identical — the player
+    // detects a mapping-only change (no re-download) and, when allowlisted, emits
+    // a media-moved report.
+    app.all('/moved/redirect/:slot', (req, res) => {
+        res.set('Access-Control-Expose-Headers', 'Location');
+        res.set('Location', `http://localhost:${port}/dedup/content/shared.jpg?v=${movedVersion}`);
+        res.status(204).end();
+    });
+    app.post('/moved/bump', (_req, res) => {
+        movedVersion++;
+        res.json({ ok: true, movedVersion });
+    });
+    // Storage-cache harness (smil/storage preservation + restore, location strategy).
+    // The slot 204+redirects to a versioned content PATH (not query param) — v1 red,
+    // v2 blue. Flipping 1 -> 2 replaces the slot's content and the player must preserve
+    // the v1 file to smil/storage; flipping back 2 -> 1 must restore it from there
+    // (media-restored) instead of downloading v1 again.
+    app.all('/storage-cache/slot', (_req, res) => {
+        res.set('Access-Control-Expose-Headers', 'Location');
+        res.set('Location', `http://localhost:${port}/storage-cache/content/image_v${storageCacheVersion}.png`);
+        res.status(204).end();
+    });
+    app.get('/storage-cache/content/:fileName', (req, res) => {
+        res.set(Object.assign(Object.assign({}, CBP_CORS_HEADERS), { 'Content-Type': 'image/png' }));
+        res.send(req.params.fileName === 'image_v1.png' ? RED_PNG : BLUE_PNG);
+    });
+    app.post('/storage-cache/set/:version', (req, res) => {
+        storageCacheVersion = Number(req.params.version);
+        res.json({ ok: true, storageCacheVersion });
     });
     // =====================================================================
     // checkBeforePlay (cbp) test harness. Provides HEAD-logging endpoints used by the
@@ -317,15 +427,18 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         res.send(png);
     });
     // =====================================================================
-    // playCheckUrl (gate) test harness. Serves the playability-gate HEAD endpoint
+    // playCheckUrl (gate) test harness. Serves the playability-gate GET endpoint
     // for the playCheckUrl Playwright spec. Deliberately separate from /cbp:
     // gate URLs never serve content, proving the gate has zero download coupling.
     // =====================================================================
-    // Names currently gated off — HEAD returns 404 (paired with skipPlaybackOnHttpStatus="404").
+    // Names currently gated off — gate GET returns 404 (paired with skipPlaybackOnHttpStatus="404").
     const gateSkipMode = new Set();
     // Forced status per name (e.g. 500 for the fail-open flow). 0/absent = no override.
     const gateStatusOverride = {};
-    // HEAD request log for verifying per-pass re-checks.
+    // Forced response delay per name in ms (exceeding the SMIL timeOut simulates a
+    // hanging gate endpoint -> XHR timeout on the player). 0/absent = answer immediately.
+    const gateDelayMs = {};
+    // Gate request log for verifying per-pass re-checks (identifiers keep the legacy "head" name).
     let gateHeadLog = [];
     app.options('/gate/*', (_req, res) => {
         res.set(CBP_CORS_HEADERS);
@@ -335,6 +448,9 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         gateSkipMode.clear();
         for (const key of Object.keys(gateStatusOverride)) {
             delete gateStatusOverride[key];
+        }
+        for (const key of Object.keys(gateDelayMs)) {
+            delete gateDelayMs[key];
         }
         gateHeadLog = [];
         res.set(CBP_CORS_HEADERS);
@@ -365,6 +481,19 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         res.set(CBP_CORS_HEADERS);
         res.json({ name, statusOverride: (_a = gateStatusOverride[name]) !== null && _a !== void 0 ? _a : null });
     });
+    app.post('/gate/delay/:name', (req, res) => {
+        var _a;
+        const name = req.params.name;
+        const ms = parseInt(String(req.query.ms), 10) || 0;
+        if (ms > 0) {
+            gateDelayMs[name] = ms;
+        }
+        else {
+            delete gateDelayMs[name];
+        }
+        res.set(CBP_CORS_HEADERS);
+        res.json({ name, delayMs: (_a = gateDelayMs[name]) !== null && _a !== void 0 ? _a : null });
+    });
     app.post('/gate/clear-head-log', (_req, res) => {
         gateHeadLog = [];
         res.set(CBP_CORS_HEADERS);
@@ -374,15 +503,22 @@ function createTestServer(serverPort = enums_1.TestServer.port) {
         res.set(CBP_CORS_HEADERS);
         res.json(gateHeadLog);
     });
-    app.head('/gate/check/:name', (req, res) => {
+    app.get('/gate/check/:name', (req, res) => {
         const name = req.params.name;
         gateHeadLog.push({ file: name, time: Date.now() });
         res.set(CBP_CORS_HEADERS);
-        if (gateStatusOverride[name]) {
-            res.status(gateStatusOverride[name]).end();
+        const answer = () => {
+            if (gateStatusOverride[name]) {
+                res.status(gateStatusOverride[name]).end();
+                return;
+            }
+            res.status(gateSkipMode.has(name) ? 404 : 200).end();
+        };
+        if (gateDelayMs[name]) {
+            setTimeout(answer, gateDelayMs[name]);
             return;
         }
-        res.status(gateSkipMode.has(name) ? 404 : 200).end();
+        answer();
     });
     // --- checkBeforePlay location strategy state ---
     let cbpLocVersion = 1;

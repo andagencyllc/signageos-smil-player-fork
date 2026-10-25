@@ -10,7 +10,6 @@ export type RegionsObject = {
 	refresh: {
 		refreshInterval: number;
 		smilFileRefresh: number;
-		expr?: string;
 		timeOut: number;
 		fallbackToPreviousPlaylist: boolean;
 	};
@@ -33,6 +32,8 @@ export type SmilLogger = {
 	type?: (smilLogging.standard | smilLogging.proofOfPlay)[];
 	endpoint?: string;
 	reportFileLimit: number;
+	// Custom-endpoint event allowlist from <meta events="...">; absent = default set
+	events?: string[];
 };
 
 export type TransitionsObject = {
@@ -82,8 +83,8 @@ export type SMILMetaObject = {
 	type?: smilLogging.standard | smilLogging.proofOfPlay;
 	endpoint?: string;
 	reportFileLimit?: string;
+	events?: string;
 	onlySmilUpdate: boolean | string;
-	expr?: string;
 	timeOut?: string;
 	syncServerUrl?: string;
 	defaultRepeatCount?: '1' | 'indefinite';

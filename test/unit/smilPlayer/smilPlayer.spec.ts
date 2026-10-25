@@ -23,6 +23,7 @@ import { expect } from 'chai';
 import { SmilPlayer } from '../../../src/components/smilPlayer';
 import { FilesManager } from '../../../src/components/files/filesManager';
 import { ISos } from '../../../src/models/sosModels';
+import { noopLog, noopLogger } from '../../../src/logger';
 
 function createSosMock(): ISos {
 	return {
@@ -36,16 +37,16 @@ function createSosMock(): ISos {
 
 describe('components/smilPlayer - injectable FilesManager', () => {
 	it('defaults to constructing its own FilesManager when none is injected', () => {
-		const player = new SmilPlayer(createSosMock(), 'https://example.com/playlist.smil');
+		const player = new SmilPlayer(createSosMock(), noopLogger, 'https://example.com/playlist.smil');
 
 		expect((player as any).files).to.be.instanceOf(FilesManager);
 	});
 
 	it('uses the injected FilesManager instance instead of constructing a new one', () => {
 		const sos = createSosMock();
-		const customFilesManager = new FilesManager(sos);
+		const customFilesManager = new FilesManager(sos, noopLog);
 
-		const player = new SmilPlayer(sos, 'https://example.com/playlist.smil', undefined, customFilesManager);
+		const player = new SmilPlayer(sos, noopLogger, 'https://example.com/playlist.smil', undefined, customFilesManager);
 
 		expect((player as any).files).to.equal(customFilesManager);
 	});

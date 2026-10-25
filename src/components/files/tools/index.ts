@@ -1,25 +1,24 @@
-import Debug from 'debug';
 import * as path from 'path';
 import * as querystring from 'querystring';
 import * as URLVar from 'url';
 import { corsAnywhere } from '../../../../config/parameters';
 import { MediaInfoObject, MergedDownloadList } from '../../../models/filesModels';
 import { CustomEndpointReport, ItemType } from '../../../models/reportingModels';
-import { getFileName, getStorageFileName } from './fileName';
+import { getFileName, getStorageFileName, hasMalformedStem } from './fileName';
 import {
+	DEFAULT_CUSTOM_ENDPOINT_EVENTS,
 	DEFAULT_LAST_MODIFIED,
 	FileStructure,
 	mapObject,
 	WidgetExtensions,
 	WidgetFullPath,
 } from '../../../enums/fileEnums';
+import { SmilLogger } from '../../../models/xmlJsonModels';
 import { isNil } from 'lodash';
 import get = require('lodash/get');
 import IRecordItemOptions from '@signageos/front-applet/es6/FrontApplet/ProofOfPlay/IRecordItemOptions';
 import { removeLastArrayItem } from '../../playlist/tools/generalTools';
 import moment from 'moment';
-
-export const debug = Debug('@signageos/smil-player:filesManager');
 
 const isUrl = require('is-url-superb');
 
@@ -46,7 +45,7 @@ export function getProtocol(url: string): string {
 	return protocol;
 }
 
-export { getFileName, getStorageFileName };
+export { getFileName, getStorageFileName, hasMalformedStem };
 
 export function getPath(filePath: string) {
 	return path.dirname(filePath);
@@ -68,11 +67,15 @@ export function getUrlWithoutQueryParams(url: string | number | null | undefined
 	}
 	try {
 		const parsedUrl = new URL(url);
-		return `${parsedUrl.origin}${parsedUrl.pathname}`;
+		// Tizen 2.4: `new URL` never throws and returns undefined origin/pathname for any input,
+		// which would collapse every value (e.g. all Last-Modified dates) into one key
+		if (typeof parsedUrl.origin === 'string' && typeof parsedUrl.pathname === 'string') {
+			return `${parsedUrl.origin}${parsedUrl.pathname}`;
+		}
 	} catch {
-		// If URL parsing fails, try simple split (handles relative URLs)
-		return url.split('?')[0];
+		// not a valid URL (e.g. Last-Modified date) - fall through to simple split
 	}
+	return url.split('?')[0];
 }
 
 export function createDownloadPath(sourceUrl: string): string {
@@ -257,12 +260,20 @@ export function shouldNotDownload(localFilePath: string, file: MergedDownloadLis
 }
 
 /**
- * playCheckUrl gate classifier: skip playback only when the gate HEAD status is explicitly listed
- * in skipPlaybackOnHttpStatus. Anything else — including unlisted 5xx — plays (fail-open).
- * An empty list means the gate is inert (the meta is required, no default).
+ * playCheckUrl gate classifier: skip playback when the gate response status is explicitly listed
+ * in skipPlaybackOnHttpStatus, or — with the element's playCheckSkipOnError flag — on any unlisted
+ * 5xx ("server broken"). Everything else plays (fail-open). An empty list means the gate is inert
+ * (the meta is required, no default).
  */
-export function shouldGateSkipForStatus(status: number, skipPlaybackHttpStatusCodes: number[]): boolean {
-	return skipPlaybackHttpStatusCodes.includes(status);
+export function shouldGateSkipForStatus(
+	status: number,
+	skipPlaybackHttpStatusCodes: number[],
+	skipOnError: boolean = false,
+): boolean {
+	if (skipPlaybackHttpStatusCodes.includes(status)) {
+		return true;
+	}
+	return skipOnError && status >= 500 && status < 600;
 }
 
 export function isWidgetUrl(widgetUrl: string): boolean {
@@ -292,7 +303,7 @@ export function createPoPMessagePayload(
 		...(value.popCustomId ? { customId: value.popCustomId } : {}),
 		...(value.popType ? { type: value.popType } : {}),
 		...(value.popTags
-			? { tags: [...value.popTags.split(','), value.useInReportUrl!, new Date().toISOString()] }
+			? { tags: [...value.popTags.split(','), value.useInReportUrl || value.src, new Date().toISOString()] }
 			: {}),
 		...(value.popFileName ? { fileName: value.popFileName } : {}),
 	};
@@ -325,6 +336,21 @@ export function shouldSkipActiveReportFile(
 	reportFileLimit: number,
 ): boolean {
 	return !!trackedInfo && !trackedInfo.hasFailureReports && reportCount < reportFileLimit;
+}
+
+/**
+ * Emission gate for custom-endpoint reports. Applied before every POST and
+ * before every offline/batch save (never on the offline upload path — saved
+ * reports are always uploaded). `enabled` is a real off switch here:
+ * log="false" blocks all custom-endpoint traffic. Without an `events`
+ * allowlist the default event set matches historical behavior.
+ */
+export function isCustomEndpointEventAllowed(logger: SmilLogger, eventName: string): boolean {
+	if (!logger.enabled) {
+		return false;
+	}
+	const allowed = logger.events && logger.events.length > 0 ? logger.events : DEFAULT_CUSTOM_ENDPOINT_EVENTS;
+	return allowed.includes(eventName);
 }
 
 export function createCustomEndpointMessagePayload(
