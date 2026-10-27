@@ -16,8 +16,8 @@
     "npm": ">=8"
   },
   "scripts": {
-    "prepare": "npm run declarations || true",
-    "declarations": "tsc -p tsconfig.declarations.json",
+    "prepare": "npm run declarations",
+    "declarations": "node ./node_modules/typescript-declarations/bin/tsc -p tsconfig.declarations.json",
     "test": "nyc --check-coverage mocha  -- \"test/**/*.spec.ts\" --require ts-node/register -P tsconfig.json",
     "test:headless": "playwright test",
     "test:reliable": "playwright test || playwright test --last-failed --workers=1",
@@ -43,7 +43,7 @@
     "clean-build": "npm run build && npm run escheck && npm run check:chrome38",
     "build": "npm run clean && cross-env NODE_OPTIONS='--openssl-legacy-provider' webpack --display-modules",
     "build-prod": "npm run clean && cross-env NODE_OPTIONS='--openssl-legacy-provider' NODE_ENV=production webpack --display-modules",
-    "build-test": "tsc",
+    "build-test": "node ./node_modules/typescript/bin/tsc",
     "start": "webpack-dev-server --mode development --open-emulator",
     "dev": "npm run e2e:servers:stop 2>/dev/null; node test-server/localServer.js & npm run start-emulator",
     "start-emulator": "cross-env NODE_OPTIONS='--openssl-legacy-provider' webpack-dev-server --mode none --open-emulator --no-hot --no-liveReload --no-watch-content-base",
@@ -95,6 +95,7 @@
     "mockdate": "3.0.5",
     "tslint": "6.1.1",
     "typescript": "3.8.3",
+    "typescript-declarations": "npm:typescript@4.9.5",
     "webpack": "4.46.0",
     "webpack-cli": "3.3.11",
     "webpack-dev-server": "3.11.0"
