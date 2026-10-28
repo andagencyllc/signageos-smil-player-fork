@@ -282,8 +282,6 @@ export class SmilPlayer implements ISmilPlayer {
 					await sleep(1000);
 				}
 
-				this.processor.setSmilObject(smilObject);
-
 				await this.files.sendSmiFileReport(
 					`${FileStructure.rootFolder}/${getFileName(smilFile.src)}`,
 					smilFile.src,
@@ -313,6 +311,10 @@ export class SmilPlayer implements ISmilPlayer {
 				// download and play intro file if exists  ( image or video ) and if its first iteration of playlist
 				// seamlessly updated playlist dont start with intro
 				if (smilObject.intro.length > 0 && playIntro && Object.keys(smilObject.dynamic).length === 0) {
+					// downloadIntro()/playIntro() below read this.smilObject directly, so it must be
+					// set before them. This is only reachable on a genuine first load (restart() always
+					// passes playIntro=false), so there's no previous version's loop that could race on it.
+					this.processor.setSmilObject(smilObject);
 					const introPromises: Promise<void>[] = [];
 					// download intro file before anything else
 					const introMedia = await this.processor.downloadIntro();
@@ -336,6 +338,13 @@ export class SmilPlayer implements ISmilPlayer {
 					await this.files.prepareDownloadMediaSetup(smilObject);
 					debug('[smil] media download complete');
 					await this.dataPrepare.manageFilesAndInfo(smilObject, smilUrl);
+					// Only expose smilObject to the processor once every element has regionInfo.
+					// This is the path restart() always takes (playIntro=false), where the previous
+					// SMIL version's playback loop is typically still running and reads
+					// this.smilObject.playlist fresh on every pass - setting it any earlier would let
+					// that loop traverse a tree with no regionInfo yet, which it does endlessly and
+					// without ever really awaiting anything (see smilUpdateRegionInfoRace.spec.ts).
+					this.processor.setSmilObject(smilObject);
 				}
 
 				// smil processing ok, end loop

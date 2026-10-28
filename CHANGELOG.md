@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) and this project adheres to
 [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- fixed content served via an update (`onlySmilUpdate`, or a `<meta http-equiv="Refresh">` reload) being exposed to the player before it had region info assigned — the previous version's still-running playback loop could then traverse it, log `[traverser] skipping element with no regionInfo` endlessly, and never show the new content. The window only existed on an update's restart path, not on first load
+
 ## [4.0.0] - 2026-07-29
 
 ### Added
