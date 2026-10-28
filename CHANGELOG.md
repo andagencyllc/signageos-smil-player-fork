@@ -10,6 +10,10 @@ Entries should be short and human-readable; for longer entries, use an indented 
 
 ## [Unreleased]
 
+### Fixed
+
+- (public) fixed content served via an update (`onlySmilUpdate`, or a `<meta http-equiv="Refresh">` reload) being exposed to the player before it had region info assigned — the previous version's still-running playback loop could then traverse it, log `[traverser] skipping element with no regionInfo` endlessly, and never show the new content. The window only existed on an update's restart path, not on first load
+
 ## [4.0.1] - 2026-10-22
 
 ### Added
