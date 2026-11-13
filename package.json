@@ -94,7 +94,7 @@
     "typescript": "3.8.3",
     "webpack": "4.46.0",
     "webpack-cli": "3.3.11",
-    "webpack-dev-server": "3.11.0"
+    "webpack-dev-server": "6.1.0"
   },
   "dependencies": {
     "@signageos/front-applet-extension-nexmosphere": "0.1.3",
